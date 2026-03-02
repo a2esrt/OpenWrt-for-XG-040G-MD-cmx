@@ -17,7 +17,7 @@ env:
   CONFIG_FILE: "config/xg-040g-md.config"
   # ⚠️ 关键修改：使用 ImmortalWrt 主线仓库 (Master)
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
-  REPO_BRANCH: master
+  REPO_BRANCH: openwrt-25.12
   FEEDS_CONF: feeds.conf.default
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup environment dependencies
         env:
@@ -239,4 +239,3 @@ jobs:
           keep_minimum_runs: 5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

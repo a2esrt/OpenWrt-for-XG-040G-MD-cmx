@@ -15,9 +15,8 @@ on:
 
 env:
   CONFIG_FILE: "config/xg-040g-md.config"
-  # ⚠️ 关键修改：使用 ImmortalWrt 主线仓库 (Master)
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
-  REPO_BRANCH: openwrt-25.12
+  REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
@@ -29,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup environment dependencies
         env:
@@ -37,26 +36,16 @@ jobs:
           TZ: ${{ env.TZ }}
         run: |
           sudo apt update
-          # 移除不兼容包
           sudo apt purge -y python3-distutils || true
           sudo apt autoremove -y
-          # 安装核心依赖
           sudo apt install -y \
             build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
             python3-setuptools python3-pyelftools rsync swig unzip zlib1g-dev file wget \
             squashfs-tools mkbootimg device-tree-compiler
           
-          if command -v mkbootimg >/dev/null 2>&1; then
-            echo "mkbootimg found at: $(command -v mkbootimg)"
-          else
-            echo "❌ mkbootimg not found in PATH!"
-          fi
-
           if [[ -n "$TZ" ]]; then
             sudo timedatectl set-timezone "$TZ"
-          else
-            echo "TZ is not set, skipping timezone setup."
           fi
 
       - name: Ensure Python build tools
@@ -68,7 +57,7 @@ jobs:
         run: |
           git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" openwrt
           
-          # --- 1. 应用基础设备补丁 (DTS/MK) ---
+          # --- 1. 应用基础设备补丁 ---
           [ -e patch/02_network ] && cp -f patch/02_network openwrt/target/linux/airoha/an7581/base-files/etc/board.d/02_network
           [ -e patch/an7581.mk ] && cp -f patch/an7581.mk openwrt/target/linux/airoha/image/an7581.mk
           [ -e patch/an7581-bell_xg-040g-md.dts ] && cp -f patch/an7581-bell_xg-040g-md.dts openwrt/target/linux/airoha/dts/an7581-bell_xg-040g-md.dts
@@ -86,14 +75,63 @@ jobs:
           [ -e patch/039-v6.14-cpufreq-airoha-Add-EN7581-CPUFreq-SMCCC-driver.patch ] && cp -f patch/039-v6.14-cpufreq-airoha-Add-EN7581-CPUFreq-SMCCC-driver.patch openwrt/target/linux/airoha/patches-6.12/
           [ -e patch/040-v6.14-pmdomain-airoha-Add-Airoha-CPU-PM-Domain-support.patch ] && cp -f patch/040-v6.14-pmdomain-airoha-Add-Airoha-CPU-PM-Domain-support.patch openwrt/target/linux/airoha/patches-6.12/
           
-          # --- 2. 应用 FM25G02B 闪存完美修复补丁 ---
+          # --- 2. 🚀 动态生成 FM25G02B 闪存补丁 (完美避开格式问题) ---
           mkdir -p openwrt/target/linux/generic/hack-6.12/
-          if [ -e patch/999-fm25g02b-simple.patch ]; then
-            cp -f patch/999-fm25g02b-simple.patch openwrt/target/linux/generic/hack-6.12/999-fm25g02b-simple.patch
-            echo "✅ 已应用 FM25G02B 专属闪存补丁"
-          fi
+          cat << 'EOF' | sed 's/^_$/ /' > openwrt/target/linux/generic/hack-6.12/999-fm25g02b-simple.patch
+          --- a/drivers/mtd/nand/spi/fmsh.c
+          +++ b/drivers/mtd/nand/spi/fmsh.c
+          @@ -108,6 +108,35 @@ static int fm25g0xd_ecc_get_status(struct spinand_device *spinand,
+           		return -EBADMSG;
+           }
+          _
+          +/* --- FM25G02B OOB --- */
+          +static int fm25g02b_ooblayout_ecc(struct mtd_info *mtd, int section,
+          +				  struct mtd_oob_region *region)
+          +{
+          +	if (section >= 4)
+          +		return -ERANGE;
+          +	region->offset = 64 + section * 16;
+          +	region->length = 16;
+          +	return 0;
+          +}
+          +
+          +static int fm25g02b_ooblayout_free(struct mtd_info *mtd, int section,
+          +				   struct mtd_oob_region *region)
+          +{
+          +	if (section)
+          +		return -ERANGE;
+          +	region->offset = 2;
+          +	region->length = 62;
+          +	return 0;
+          +}
+          +
+          +static const struct mtd_ooblayout_ops fm25g02b_ooblayout = {
+          +	.ecc = fm25g02b_ooblayout_ecc,
+          +	.rfree = fm25g02b_ooblayout_free,
+          +};
+          _
+           static const struct spinand_info fmsh_spinand_table[] = {
+           	SPINAND_INFO("FM25S01A",
+           		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0xE4),
+          @@ -148,6 +177,15 @@ static const struct spinand_info fmsh_spinand_table[] = {
+           					      &update_cache_variants),
+           		     SPINAND_HAS_QE_BIT,
+           		     SPINAND_ECCINFO(&fm25s01_ooblayout, fm25s01bi3_ecc_ecc_get_status)),
+          +	SPINAND_INFO("FM25G02B",
+          +		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0xD2),
+          +		     NAND_MEMORG(1, 2048, 128, 64, 2048, 40, 1, 1, 1),
+          +		     NAND_ECCREQ(8, 512),
+          +		     SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
+          +					      &write_cache_variants,
+          +					      &update_cache_variants),
+          +		     SPINAND_HAS_QE_BIT,
+          +		     SPINAND_ECCINFO(&fm25g02b_ooblayout, NULL)),
+           	SPINAND_INFO("FM25G02D",
+           		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_DUMMY, 0xF2),
+          EOF
+          echo "✅ 已动态生成 FM25G02B 补丁，彻底防报错！"
 
-          # --- 3. 下载常规第三方插件 (仅保留不在 feeds 中或需手动拉取的组件) ---
+          # --- 3. 下载常规第三方插件 ---
           git clone https://github.com/sirpdboy/luci-app-eqosplus openwrt/package/luci-app-eqosplus
           git clone https://github.com/rchen14b/luci-app-airoha-npu openwrt/package/luci-app-airoha-npu
 
@@ -109,7 +147,7 @@ jobs:
       - name: Hotfix LuCI & Third-party Packages
         working-directory: ./openwrt
         run: |
-          # 1. 修复 LuCI cbi.js 报错 (防止界面崩溃)
+          # 1. 修复 LuCI cbi.js 报错
           CBI_JS="feeds/luci/modules/luci-base/htdocs/luci-static/resources/cbi.js"
           if [ -f "$CBI_JS" ]; then
             sed -i -E "s@return[[:space:]]*''\\.format\\.apply\\(arguments\\[0\\],[[:space:]]*a\\);@return String.prototype.format.apply(arguments[0], a.slice(1));@g" "$CBI_JS"
@@ -140,7 +178,7 @@ jobs:
           done
           rm -rf package/passwall-packages
 
-          # 5. PassWall Lua 空指针修复补丁 (关键防错)
+          # 5. PassWall Lua 空指针修复补丁
           PW_LUA="package/luci-app-passwall/luasrc/model/cbi/passwall/client/global.lua"
           if [ -f "$PW_LUA" ]; then
             sed -i 's#local dns_shunt_val = s.fields\["dns_shunt"\]:formvalue(section)#local dns_shunt_val = (s.fields["dns_shunt"] and s.fields["dns_shunt"]:formvalue(section)) or ""#g' "$PW_LUA"
